@@ -2,133 +2,184 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+
+# Function to fetch data
+@st.cache_data
+def get_data(symbol, interval, period='60d'):
+    try:
+        data = yf.download(symbol, interval=interval, period=period, progress=False)
+        if data.empty:
+            return None
+        data.dropna(inplace=True)
+        return data
+    except Exception as e:
+        return None
+
+# Strategy functions
+def sma_strategy(data):
+    data['SMA20'] = data['Close'].rolling(window=20).mean()
+    data['SMA50'] = data['Close'].rolling(window=50).mean()
+    data['Signal_SMA'] = np.where(data['SMA20'] > data['SMA50'], 'Buy', 'Sell')
+    return data
+
+def rsi_strategy(data, period=14):
+    delta = data['Close'].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=period).mean()
+    avg_loss = pd.Series(loss).rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    data['Signal_RSI'] = np.where(data['RSI'] < 30, 'Buy', np.where(data['RSI'] > 70, 'Sell', 'Hold'))
+    return data
+
+def macd_strategy(data):
+    exp1 = data['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD'] = exp1 - exp2
+    data['Signal_Line'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    data['Signal_MACD'] = np.where(data['MACD'] > data['Signal_Line'], 'Buy', 'Sell')
+    return data
+
+def bollinger_strategy(data):
+    sma = data['Close'].rolling(window=20).mean()
+    std = data['Close'].rolling(window=20).std()
+    data['Upper'] = sma + (2 * std)
+    data['Lower'] = sma - (2 * std)
+    data['Signal_BB'] = np.where(data['Close'] < data['Lower'], 'Buy', np.where(data['Close'] > data['Upper'], 'Sell', 'Hold'))
+    return data
+
+# Streamlit layout
+st.set_page_config(layout="wide")
+st.sidebar.title("Trading Dashboard")
+
+# Inputs
+symbol = st.sidebar.selectbox("Select Symbol", ['GBPUSD=X', 'EURUSD=X', 'AAPL', 'GOOG', 'MSFT'])
+interval = st.sidebar.selectbox("Select Interval", ['1m', '5m', '10m', '15m', '30m', '1h', '4h', '1d', '1wk', '1mo'])
+strategies = st.sidebar.multiselect("Select Strategies", ['SMA Crossover', 'RSI', 'MACD', 'Bollinger Bands'], default=['SMA Crossover'])
+
+# Fetch data
+data = get_data(symbol, interval)
+
+# Main area
+col1, col2 = st.columns([1, 3])
+
+with col1:
+    st.write("### Selected Symbol:", symbol)
+    st.write("### Interval:", interval)
+    if data is None:
+        st.error("Failed to retrieve data. Please try a different symbol or interval.")
+    else:
+        st.success("Live data loaded successfully.")
+        st.write("### Latest Price:", data['Close'].iloc[-1])
+
+with col2:
+    if data is not None:
+        if 'SMA Crossover' in strategies:
+            data = sma_strategy(data)
+        if 'RSI' in strategies:
+            data = rsi_strategy(data)
+        if 'MACD' in strategies:
+            data = macd_strategy(data)
+        if 'Bollinger Bands' in strategies:
+            data = bollinger_strategy(data)
+
+        # Plotting
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(data['Close'], label='Close Price')
+        if 'SMA Crossover' in strategies:
+            ax.plot(data['SMA20'], label='SMA 20')
+            ax.plot(data['SMA50'], label='SMA 50')
+        if 'Bollinger Bands' in strategies:
+            ax.plot(data['Upper'], linestyle='--', color='gray', label='Upper Band')
+            ax.plot(data['Lower'], linestyle='--', color='gray', label='Lower Band')
+        ax.set_title(f"{symbol} Price Chart")
+        ax.legend()
+        st.pyplot(fig)
+
+        # Alerts
+        st.subheader("Trade Alerts")
+        alerts = []
+        if 'SMA Crossover' in strategies:
+            if data['Signal_SMA'].iloc[-1] == 'Buy':
+                alerts.append("SMA Crossover: Buy Signal")
+            elif data['Signal_SMA'].iloc[-1] == 'Sell':
+                alerts.append("SMA Crossover: Sell Signal")
+        if 'RSI' in strategies:
+            if data['Signal_RSI'].iloc[-1] == 'Buy':
+                alerts.append("RSI: Buy Signal (Oversold)")
+            elif data['Signal_RSI'].iloc[-1] == 'Sell':
+                alerts.append("RSI: Sell Signal (Overbought)")
+        if 'MACD' in strategies:
+            if data['Signal_MACD'].iloc[-1] == 'Buy':
+                alerts.append("MACD: Buy Signal")
+            elif data['Signal_MACD'].iloc[-1] == 'Sell':
+                alerts.append("MACD: Sell Signal")
+        if 'Bollinger Bands' in strategies:
+            if data['Signal_BB'].iloc[-1] == 'Buy':
+                alerts.append("Bollinger Bands: Buy Signal (Below Lower Band)")
+            elif data['Signal_BB'].iloc[-1] == 'Sell':
+                alerts.append("Bollinger Bands: Sell Signal (Above Upper Band)")
+
+        if alerts:
+            for alert in alerts:
+                st.warning(alert)
+        else:
+            st.info("No trade signals at the moment.")
+
+
+
+
+# --- Predictive Signal with Entry and Exit Time (GMT+0) ---
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+import numpy as np
+import pandas as pd
 
-# -----------------------------
-# Technical Indicator Functions
-# -----------------------------
-def add_indicators(df):
-    df['SMA_10'] = df['Close'].rolling(window=10).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    delta = df['Close'].diff()
+def generate_features(data):
+    data['SMA_10'] = data['Close'].rolling(window=10).mean()
+    data['SMA_50'] = data['Close'].rolling(window=50).mean()
+    delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['Upper_BB'] = df['Close'].rolling(window=20).mean() + 2 * df['Close'].rolling(window=20).std()
-    df['Lower_BB'] = df['Close'].rolling(window=20).mean() - 2 * df['Close'].rolling(window=20).std()
-    return df
+    data['RSI'] = 100 - (100 / (1 + rs))
+    exp1 = data['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD'] = exp1 - exp2
+    data['Upper_BB'] = data['Close'].rolling(window=20).mean() + 2 * data['Close'].rolling(window=20).std()
+    data['Lower_BB'] = data['Close'].rolling(window=20).mean() - 2 * data['Close'].rolling(window=20).std()
+    data = data.dropna()
+    return data
 
-# -----------------------------
-# Predictive Model Integration
-# -----------------------------
-def train_predictive_model():
-    np.random.seed(42)
-    prices = np.cumsum(np.random.randn(1200)) + 100
-    dates = pd.date_range(end=pd.Timestamp.today(), periods=1200)
-    df = pd.DataFrame({'Date': dates, 'Close': prices})
-    df['Open'] = df['Close'] + np.random.randn(1200)
-    df['High'] = df[['Open', 'Close']].max(axis=1) + np.random.rand(1200)
-    df['Low'] = df[['Open', 'Close']].min(axis=1) - np.random.rand(1200)
-    df['Volume'] = np.random.randint(1000000, 5000000, size=1200)
-    df.set_index('Date', inplace=True)
-    df = add_indicators(df)
-    df['Target'] = np.where(df['Close'].shift(-1) > df['Close'], 1, 0)
-    df.dropna(inplace=True)
-    features = ['SMA_10', 'SMA_50', 'RSI', 'MACD', 'Signal_Line', 'Upper_BB', 'Lower_BB']
-    X = df[features]
-    y = df['Target']
+def train_predictive_model(data):
+    data = generate_features(data.copy())
+    data['Target'] = np.where(data['Close'].shift(-1) > data['Close'], 1, 0)
+    features = ['SMA_10', 'SMA_50', 'RSI', 'MACD', 'Upper_BB', 'Lower_BB']
+    data = data.dropna()
+    if len(data) < 10:
+        return None, None, None
+    X = data[features]
+    y = data['Target']
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_scaled, y)
-    return model, scaler, features
+    latest = X.iloc[[-1]]
+    latest_scaled = scaler.transform(latest)
+    prediction = model.predict(latest_scaled)[0]
+    signal = 'Buy' if prediction == 1 else 'Sell'
+    entry_time = data.index[-1].tz_localize('UTC')
+    exit_time = entry_time + timedelta(minutes=30)
+    return signal, entry_time.strftime('%Y-%m-%d %H:%M GMT+0'), exit_time.strftime('%Y-%m-%d %H:%M GMT+0')
 
-model, scaler, feature_cols = train_predictive_model()
-
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(layout="wide")
-st.title("📈 Enhanced Trading Dashboard with Predictive Signals")
-
-symbols = {
-    "Apple (AAPL)": "AAPL",
-    "Microsoft (MSFT)": "MSFT",
-    "Tesla (TSLA)": "TSLA",
-    "EUR/USD": "EURUSD=X",
-    "GBP/USD": "GBPUSD=X",
-    "Bitcoin (BTC)": "BTC-USD",
-    "Ethereum (ETH)": "ETH-USD"
-}
-
-symbol_name = st.sidebar.selectbox("Select Symbol", list(symbols.keys()))
-symbol = symbols[symbol_name]
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2023-01-01"))
-end_date = st.sidebar.date_input("End Date", pd.to_datetime("today"))
-
-strategies = st.sidebar.multiselect("Select Strategies", ["SMA Crossover", "RSI", "MACD", "Bollinger Bands"])
-
-@st.cache_data
-def load_data(symbol, start, end):
-    try:
-        df = yf.download(symbol, start=start, end=end)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return pd.DataFrame()
-
-data = load_data(symbol, start_date, end_date)
-
-if data.empty:
-    st.warning("No data available for the selected symbol and date range.")
-else:
-    data = add_indicators(data)
-
-    # Apply strategies
-    if "SMA Crossover" in strategies:
-        data['SMA_Signal'] = np.where(data['SMA_10'] > data['SMA_50'], 1, 0)
-    if "RSI" in strategies:
-        data['RSI_Signal'] = np.where(data['RSI'] < 30, 1, np.where(data['RSI'] > 70, -1, 0))
-    if "MACD" in strategies:
-        data['MACD_Signal'] = np.where(data['MACD'] > data['Signal_Line'], 1, 0)
-    if "Bollinger Bands" in strategies:
-        data['BB_Signal'] = np.where(data['Close'] < data['Lower_BB'], 1, np.where(data['Close'] > data['Upper_BB'], -1, 0))
-
-    # Predictive Signal
-    latest = data.dropna().iloc[-1:]
-    if not latest.empty:
-        X_pred = scaler.transform(latest[feature_cols])
-        prediction = model.predict(X_pred)[0]
-        signal = "Buy" if prediction == 1 else "Sell"
-        st.subheader("📊 Predicted Signal")
-        st.markdown(f"**Signal**: `{signal}`")
-        st.markdown(f"**Time**: `{latest.index[0].strftime('%Y-%m-%d')}`")
-
-    # Plotting
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=data.index,
-        open=data['Open'],
-        high=data['High'],
-        low=data['Low'],
-        close=data['Close'],
-        name='Price'
-    ))
-    fig.update_layout(title=f"{symbol} Price Chart", xaxis_rangeslider_visible=False, template="plotly_dark")
-
-    if "SMA Crossover" in strategies:
-        fig.add_trace(go.Scatter(x=data.index, y=data['SMA_10'], mode='lines', name='SMA 10'))
-        fig.add_trace(go.Scatter(x=data.index, y=data['SMA_50'], mode='lines', name='SMA 50'))
-    if "Bollinger Bands" in strategies:
-        fig.add_trace(go.Scatter(x=data.index, y=data['Upper_BB'], line=dict(dash='dot'), name='Upper BB'))
-        fig.add_trace(go.Scatter(x=data.index, y=data['Lower_BB'], line=dict(dash='dot'), name='Lower BB'))
-
-    st.plotly_chart(fig, use_container_width=True)
-
+# Example usage in Streamlit
+import streamlit as st
+if 'data' in locals() and not data.empty:
+    signal, entry_time, exit_time = train_predictive_model(data)
+    if signal:
+        st.subheader("📈 Predictive Trade Signal")
+        st.markdown(f"**Signal**: {signal}")
+        st.markdown(f"**Entry Time**: {entry_time}")
+        st.markdown(f"**Suggested Exit Time**: {exit_time}")
