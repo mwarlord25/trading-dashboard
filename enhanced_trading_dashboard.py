@@ -1,103 +1,113 @@
 
-import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
+import streamlit as st
 import plotly.graph_objects as go
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
 
-st.set_page_config(layout="wide")
-st.title("📈 Trading Agent Dashboard v2")
+# Streamlit UI
+st.title("Enhanced Trading Dashboard with Backtesting and Alerts")
 
+# User inputs
+symbol = st.selectbox("Select Symbol", ['AAPL', 'MSFT', 'GOOGL', 'EURUSD=X', 'GBPUSD=X'])
+start_date = st.date_input("Start Date", pd.to_datetime("2023-01-01"))
+end_date = st.date_input("End Date", pd.to_datetime("today"))
+email_alert = st.checkbox("Enable Email Alerts")
+user_email = st.text_input("Enter your email for alerts") if email_alert else None
+
+# Fetch data
 @st.cache_data
-def load_data(symbol, start, end, interval):
+def load_data(symbol, start, end):
     try:
-        df = yf.download(symbol, start=start, end=end, interval=interval)
-        df.dropna(inplace=True)
-        return df
+        data = yf.download(symbol, start=start, end=end)
+        return data
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
 
-def sma_strategy(df):
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    return df
+data = load_data(symbol, start_date, end_date)
 
-def rsi_strategy(df, period=14):
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    return df
+if data.empty:
+    st.warning("No data available for the selected symbol and date range.")
+    st.stop()
 
-def macd_strategy(df):
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    return df
+# Strategy: Simple Moving Average Crossover
+def sma_strategy(data):
+    data['SMA20'] = data['Close'].rolling(window=20).mean()
+    data['SMA50'] = data['Close'].rolling(window=50).mean()
+    data['Signal'] = 0
+    data.loc[data['SMA20'] > data['SMA50'], 'Signal'] = 1
+    data.loc[data['SMA20'] < data['SMA50'], 'Signal'] = -1
+    return data
 
-def bollinger_strategy(df):
-    sma = df['Close'].rolling(window=20).mean()
-    std = df['Close'].rolling(window=20).std()
-    df['Upper'] = sma + (2 * std)
-    df['Lower'] = sma - (2 * std)
-    return df
+# Apply strategy
+data = sma_strategy(data)
 
-def plot_chart(df, symbol, strategies):
+# Plotting
+def plot_chart(data):
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=df.index,
-                                 open=df['Open'], high=df['High'],
-                                 low=df['Low'], close=df['Close'],
-                                 name='Candlestick'))
+    fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='Close'))
+    fig.add_trace(go.Scatter(x=data.index, y=data['SMA20'], name='SMA20'))
+    fig.add_trace(go.Scatter(x=data.index, y=data['SMA50'], name='SMA50'))
+    st.plotly_chart(fig)
 
-    if 'SMA Crossover' in strategies:
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='SMA 20'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode='lines', name='SMA 50'))
+plot_chart(data)
 
-    if 'Bollinger Bands' in strategies:
-        fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='gray', width=1), name='Upper Band'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='gray', width=1), name='Lower Band'))
+# Backtesting
+def backtest(data):
+    data['Returns'] = data['Close'].pct_change()
+    data['Strategy_Returns'] = data['Signal'].shift(1) * data['Returns']
+    data['Cumulative_Strategy'] = (1 + data['Strategy_Returns']).cumprod()
+    data['Cumulative_Market'] = (1 + data['Returns']).cumprod()
+    win_rate = (data['Strategy_Returns'] > 0).sum() / data['Strategy_Returns'].count()
+    return data, win_rate
 
-    fig.update_layout(title=f"{symbol} Price Chart", xaxis_title="Date", yaxis_title="Price", height=600)
-    st.plotly_chart(fig, use_container_width=True)
+data, win_rate = backtest(data)
+st.subheader("Backtesting Results")
+st.write(f"Strategy Win Rate: {win_rate:.2%}")
 
-    if 'RSI' in strategies:
-        st.subheader("RSI Indicator")
-        st.line_chart(df['RSI'])
-
-    if 'MACD' in strategies:
-        st.subheader("MACD Indicator")
-        st.line_chart(df[['MACD', 'Signal']])
-
-# Sidebar inputs
-symbol = st.sidebar.text_input("Enter Stock Symbol", value="AAPL")
-interval = st.sidebar.selectbox("Select Interval", ['1d', '1h', '15m'])
-start_date = st.sidebar.date_input("Start Date", value=datetime(2023, 1, 1))
-end_date = st.sidebar.date_input("End Date", value=datetime.today())
-strategies = st.sidebar.multiselect("Select Strategies", ['SMA Crossover', 'RSI', 'MACD', 'Bollinger Bands'])
-
-# Load and process data
-data = load_data(symbol, start_date, end_date, interval)
-
-if not data.empty:
-    strategy_functions = {
-        'SMA Crossover': sma_strategy,
-        'RSI': rsi_strategy,
-        'MACD': macd_strategy,
-        'Bollinger Bands': bollinger_strategy
-    }
-
-    for strategy in strategies:
-        data = strategy_functions[strategy](data)
-
-    plot_chart(data, symbol, strategies)
-
-    # Download button
-    csv = data.to_csv().encode('utf-8')
-    st.download_button("Download Data as CSV", csv, f"{symbol}_data.csv", "text/csv")
+# Trade Signal
+if not data['Signal'].dropna().empty:
+    latest_signal = data['Signal'].iloc[-1]
+    signal_time = data.index[-1]
+    if latest_signal == 1:
+        st.success(f"Buy Signal at {signal_time}")
+        trade_action = "Buy"
+    elif latest_signal == -1:
+        st.error(f"Sell Signal at {signal_time}")
+        trade_action = "Sell"
+    else:
+        st.info(f"Hold Signal at {signal_time}")
+        trade_action = "Hold"
 else:
-    st.warning("No data available for the selected parameters.")
+    st.warning("No signal data available.")
+    trade_action = "None"
+
+# Email Alert
+def send_email(recipient, subject, body):
+    try:
+        smtp_server = "smtp.gmail.com"
+        smtp_port = 465
+        sender_email = "your_email@gmail.com"
+        sender_password = "your_app_password"
+
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = sender_email
+        msg['To'] = recipient
+
+        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, recipient, msg.as_string())
+        return True
+    except Exception as e:
+        st.error(f"Failed to send email: {e}")
+        return False
+
+if email_alert and user_email and trade_action in ["Buy", "Sell"]:
+    subject = f"Trade Alert: {trade_action} {symbol}"
+    body = f"A {trade_action} signal was generated for {symbol} at {signal_time}."
+    if send_email(user_email, subject, body):
+        st.success("Email alert sent successfully.")
